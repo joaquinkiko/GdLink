@@ -1,0 +1,7 @@
+.godot/
+*.uid
+.editorconfig
+export_presets.cfg
+project.godot
+.builds/
+addons/gut/
