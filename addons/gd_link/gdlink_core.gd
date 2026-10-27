@@ -5,6 +5,8 @@ extends RefCounted
 const CHANNEL_GDLINK := 3
 ## Channels reserved to be used by transports/users at their discretion
 const RESERVED_CHANNEL_LIMIT := 3
+## Max bytes per packet payload
+const MAX_PAYLOAD_BYTES := 4096
 
 ## Time before dropping unauthenticated peer
 const AUTHENTICATION_TIMEOUT_SECONDS := 10.0
