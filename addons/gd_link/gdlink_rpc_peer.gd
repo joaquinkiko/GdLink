@@ -11,7 +11,7 @@ var target_peer_identifier := 0
 var _transfer_mode := MultiplayerPeer.TRANSFER_MODE_RELIABLE
 var _transfer_channel := 0
 var unique_identifier := 1
-var status := MultiplayerPeer.CONNECTION_DISCONNECTED
+var status := MultiplayerPeer.CONNECTION_CONNECTING # Start as CONNECTING so engine doesn't reject
 var refuse_connections := false
 
 func _init(session_instance: Session) -> void:
@@ -71,11 +71,18 @@ func _get_packet_script() -> PackedByteArray:
 func _get_available_packet_count() -> int:
 	return queued_packets.size()
 
+func _peek_packet() -> Dictionary:
+	if not current_packet.is_empty():
+		return current_packet
+	if queued_packets.is_empty():
+		return {}
+	return queued_packets[0]
+
 func _get_packet_peer() -> int:
-	return current_packet.get("peer", 0)
+	return _peek_packet().get("peer", 0)
 
 func _get_packet_channel() -> int:
-	return current_packet.get("channel", 0)
+	return _peek_packet().get("channel", 0)
 
 func _get_packet_mode() -> MultiplayerPeer.TransferMode:
 	return transfer_mode
@@ -87,10 +94,12 @@ func _get_unique_id() -> int:
 	return unique_identifier
 
 func _get_connection_status() -> MultiplayerPeer.ConnectionStatus:
+	if session != null && session.is_hosting:
+		return MultiplayerPeer.CONNECTION_CONNECTED
 	return status
 
 func _is_server() -> bool:
-	return session.is_hosting
+	return session != null && session.is_hosting
 
 func _is_server_relay_supported() -> bool:
 	return false
