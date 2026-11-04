@@ -3,7 +3,9 @@ class_name Session
 extends Node
 
 ## Single-byte payload the host sends to accept a client's hello.
-const ACCEPT_BYTE := 1
+const ACCEPT_BYTE := GdLinkCore.ControlMessage.ACCEPT
+## Total size of an accept message
+const ACCEPT_SIZE := 5
 
 ## Client: emitted after the host accepts the hello.
 signal join_succeeded(assigned_identifier: int)
@@ -102,25 +104,40 @@ func _on_peer_connected(peer_identifier: int) -> void:
 		_on_authentication_timeout.bind(peer_identifier))
 
 func _on_join_succeeded(server_peer_identifier: int) -> void:
-	transport.send_control(server_peer_identifier, authenticator.build_hello())
+	transport.send_control(server_peer_identifier, _build_hello_message())
+
+func _build_hello_message() -> PackedByteArray:
+	var message := PackedByteArray([GdLinkCore.ControlMessage.HELLO])
+	message.append_array(authenticator.build_hello())
+	return message
 
 func _on_control_received(peer_identifier: int, payload: PackedByteArray) -> void:
+	if payload.is_empty(): return
+	var message_type := payload[0]
 	if is_hosting:
-		_handle_hello(peer_identifier, payload)
-	elif payload.size() == 5 and payload[0] == ACCEPT_BYTE:
+		_handle_client_control(peer_identifier, message_type, payload.slice(1))
+	elif message_type == ACCEPT_BYTE and payload.size() == ACCEPT_SIZE:
 		is_client_authenticated = true
 		join_succeeded.emit(payload.decode_u32(1))
 
-## Host: verifies the hello once. Replays from authenticated peers are ignored.
-func _handle_hello(peer_identifier: int, payload: PackedByteArray) -> void:
+## Host: dispatches client control. Only HELLO is accepted from clients.
+func _handle_client_control(peer_identifier: int, message_type: int, body: PackedByteArray) -> void:
 	var peer: Peer = peers.get(peer_identifier)
-	if peer == null or peer.state != Peer.State.AWAITING_HELLO: return
-	var reason := authenticator.verify_hello(peer.identity, payload)
+	if peer == null: return
+	if message_type == GdLinkCore.ControlMessage.HELLO:
+		_handle_hello(peer, body)
+	elif peer.state == Peer.State.AWAITING_HELLO:
+		transport.disconnect_peer(peer_identifier, GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
+
+## Host: verifies the hello once. Replays from authenticated peers are ignored.
+func _handle_hello(peer: Peer, body: PackedByteArray) -> void:
+	if peer.state != Peer.State.AWAITING_HELLO: return
+	var reason := authenticator.verify_hello(peer.identity, body)
 	if reason != GdLinkCore.DisconnectReason.NONE:
-		transport.disconnect_peer(peer_identifier, reason)
+		transport.disconnect_peer(peer.peer_identifier, reason)
 		return
 	peer.mark_authenticated()
-	transport.send_control(peer_identifier, _build_accept(peer_identifier))
+	transport.send_control(peer.peer_identifier, _build_accept(peer.peer_identifier))
 	peer_authenticated.emit(peer)
 
 ## Host: drops the peer if it is still awaiting hello. Stale timers no-op.

@@ -58,7 +58,7 @@ func test_valid_hello_authenticates_and_sends_accept() -> void:
 	session.host(FAKE_PORT)
 	_connect_peer(1, FAKE_IP)
 	watch_signals(session)
-	transport.control_received.emit(1, authenticator.build_hello())
+	transport.control_received.emit(1, session._build_hello_message())
 	assert_true(session.get_peer(1).is_authenticated())
 	assert_signal_emitted(session, "peer_authenticated")
 	assert_eq(transport.sent_controls[0][1], session._build_accept(1))
@@ -67,8 +67,8 @@ func test_replayed_hello_after_auth_is_ignored() -> void:
 	session.host(FAKE_PORT)
 	_connect_peer(1, FAKE_IP)
 	watch_signals(session)
-	transport.control_received.emit(1, authenticator.build_hello())
-	transport.control_received.emit(1, authenticator.build_hello())
+	transport.control_received.emit(1, session._build_hello_message())
+	transport.control_received.emit(1, session._build_hello_message())
 	assert_signal_emit_count(session, "peer_authenticated", 1)
 	assert_eq(transport.sent_controls.size(), 1)
 
@@ -81,7 +81,7 @@ func test_timeout_disconnects_unauthenticated_peer() -> void:
 func test_timeout_ignores_authenticated_peer() -> void:
 	session.host(FAKE_PORT)
 	_connect_peer(1, FAKE_IP)
-	transport.control_received.emit(1, authenticator.build_hello())
+	transport.control_received.emit(1, session._build_hello_message())
 	session._on_authentication_timeout(1)
 	assert_eq(transport.disconnected_calls.size(), 0)
 
@@ -102,7 +102,7 @@ func test_disconnect_removes_peer_and_emits() -> void:
 func test_client_sends_hello_on_join_succeeded() -> void:
 	session.join(FAKE_ADDRESS)
 	transport.join_succeeded.emit(1)
-	assert_eq(transport.sent_controls[0][1], authenticator.build_hello())
+	assert_eq(transport.sent_controls[0][1], session._build_hello_message())
 
 func test_client_marks_authenticated_on_accept() -> void:
 	session.join(FAKE_ADDRESS)
@@ -149,3 +149,16 @@ func test_disconnect_of_unknown_peer_emits_nothing() -> void:
 	watch_signals(session)
 	transport.peer_disconnected.emit(99, GdLinkCore.DisconnectReason.VOLUNTARY)
 	assert_signal_not_emitted(session, "peer_removed")
+
+func test_non_hello_before_auth_disconnects_peer() -> void:
+	session.host(FAKE_PORT)
+	_connect_peer(1, FAKE_IP)
+	transport.control_received.emit(1, PackedByteArray([GdLinkCore.ControlMessage.ACCEPT, 0, 0, 0, 0]))
+	assert_eq(transport.disconnected_calls[0][1], GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
+
+func test_empty_control_payload_is_ignored() -> void:
+	session.host(FAKE_PORT)
+	_connect_peer(1, FAKE_IP)
+	transport.control_received.emit(1, PackedByteArray())
+	assert_eq(transport.disconnected_calls.size(), 0)
+	assert_eq(session.get_peer(1).state, Peer.State.AWAITING_HELLO)

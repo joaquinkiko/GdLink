@@ -14,6 +14,13 @@ const AUTHENTICATION_TIMEOUT_SECONDS := 10.0
 ## Rate-limit on failed authenication attempts per player identity
 const AUTHENTICATION_ATTEMPTS_PER_MINUTE := 5
 
+## First byte of every control payload indicating type
+enum ControlMessage {
+	INVALID = 0,
+	HELLO = 1,
+	ACCEPT = 2,
+	}
+
 ## Reason given to client for their disconnect
 enum DisconnectReason {
 	NONE = 0,

@@ -45,7 +45,7 @@ func before_each() -> void:
 	session = add_child_autofree(Session.new())
 	session.setup(transport, VersionAuthenticator.new())
 	rpc_peer = GdLinkRpcPeer.new(session)
-	hello = session.authenticator.build_hello()
+	hello = session._build_hello_message()
 	payload = PackedByteArray([7, 7, 7])
 
 func _host_authenticated(peer_identifier: int) -> void:
