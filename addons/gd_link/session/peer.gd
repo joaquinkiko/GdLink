@@ -6,6 +6,7 @@ enum State { CONNECTING, AWAITING_HELLO, AUTHENTICATED }
 var peer_identifier: int
 var identity: String
 var state: State = State.CONNECTING
+var meta: Dictionary
 
 func _init(peer_identifier_value: int, identity_value: String) -> void:
 	peer_identifier = peer_identifier_value

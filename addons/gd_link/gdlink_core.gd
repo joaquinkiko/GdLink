@@ -19,7 +19,15 @@ enum ControlMessage {
 	INVALID = 0,
 	HELLO = 1,
 	ACCEPT = 2,
+	META_SERVER_SET = 3,
+	META_SERVER_ERASE = 4,
+	META_PEER_SET = 5,
+	META_PEER_ERASE = 6,
+	META_SNAPSHOT_END = 7,
 	}
+
+## Peer identifier that owns host-side peer meta.
+const HOST_PEER_IDENTIFIER := 1
 
 ## Reason given to client for their disconnect
 enum DisconnectReason {

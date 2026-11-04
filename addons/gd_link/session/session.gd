@@ -30,6 +30,10 @@ var is_hosting := false
 var is_client_authenticated := false
 ## Host only. Peer objects keyed by peer identifier.
 var peers: Dictionary = {}
+## Host only. Owns host-side peer meta under HOST_PEER_IDENTIFIER. Not in peers.
+var host_peer: Peer
+## Server specific meta
+var server_meta: Dictionary
 
 func _process(_delta: float) -> void:
 	if transport != null: transport.poll()
@@ -59,11 +63,14 @@ func setup(transport_instance: Transport, authenticator_instance: Authenticator)
 ## Starts hosting on bind_address. Returns the transport's error code.
 func host(bind_address: String) -> Error:
 	is_hosting = true
+	host_peer = Peer.new(GdLinkCore.HOST_PEER_IDENTIFIER, "")
+	host_peer.mark_authenticated()
 	return transport.host(bind_address)
 
 ## Joins the host at join_address. Returns the transport's error code.
 func join(join_address: String) -> Error:
 	is_hosting = false
+	host_peer = null
 	return transport.join(join_address)
 
 ## Client: closes the session with DisconnectReason.VOLUNTARY.
@@ -163,3 +170,52 @@ func _build_accept(assigned_identifier: int) -> PackedByteArray:
 	accept[0] = ACCEPT_BYTE
 	accept.encode_u32(1, assigned_identifier)
 	return accept
+
+## Returns the server meta dictionary. Host and client each hold their own copy.
+func get_server_meta() -> Dictionary:
+	return server_meta.duplicate(true)
+
+## Returns peer meta for peer_identifier, or an empty dictionary if unknown.
+func get_peer_meta(peer_identifier: int) -> Dictionary:
+	var owner := _get_meta_owner(peer_identifier)
+	if owner != null:
+		return owner.meta.duplicate(true)
+	else:
+		return {}
+
+## Host: sets a server meta value. Ignored with a warning on clients.
+func set_server_meta(key: StringName, value: Variant) -> void:
+	if not (_can_write_meta() && MetaCodec.is_valid_key(key) && MetaCodec.is_valid_value(value)):
+		return
+	server_meta[key] = value
+
+## Host: erases a server meta key. Ignored with a warning on clients.
+func erase_server_meta(key: StringName) -> void:
+	if _can_write_meta():
+		server_meta.erase(key)
+
+## Host: sets a value on an authenticated peer's meta. Peer 1 is the host.
+func set_peer_meta(peer_identifier: int, key: StringName, value: Variant) -> void:
+	var owner := _get_meta_owner(peer_identifier)
+	if not (_can_write_meta() && owner != null && owner.is_authenticated()):
+		return
+	if not (MetaCodec.is_valid_key(key) && MetaCodec.is_valid_value(value)):
+		return
+	owner.meta[key] = value
+
+## Host: erases a key from a peer's meta. Ignored with a warning on clients.
+func erase_peer_meta(peer_identifier: int, key: StringName) -> void:
+	var owner := _get_meta_owner(peer_identifier)
+	if _can_write_meta() && owner != null:
+		owner.meta.erase(key)
+
+func _can_write_meta() -> bool:
+	if is_hosting:
+		return true
+	GdLinkCore.log_message(GdLinkCore.LogLevel.WARN, "Meta write ignored: only the host may write meta")
+	return false
+
+func _get_meta_owner(peer_identifier: int) -> Peer:
+	if peer_identifier == GdLinkCore.HOST_PEER_IDENTIFIER:
+		return host_peer
+	return get_peer(peer_identifier)

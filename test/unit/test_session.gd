@@ -162,3 +162,79 @@ func test_empty_control_payload_is_ignored() -> void:
 	transport.control_received.emit(1, PackedByteArray())
 	assert_eq(transport.disconnected_calls.size(), 0)
 	assert_eq(session.get_peer(1).state, Peer.State.AWAITING_HELLO)
+
+func _authenticate_peer(peer_identifier: int) -> void:
+	_connect_peer(peer_identifier, FAKE_IP)
+	transport.control_received.emit(peer_identifier, session._build_hello_message())
+
+func test_host_peer_exists_and_is_not_in_peers() -> void:
+	session.host(FAKE_PORT)
+	assert_eq(session.host_peer.peer_identifier, GdLinkCore.HOST_PEER_IDENTIFIER)
+	assert_true(session.get_authenticated_peers().is_empty())
+
+func test_join_clears_host_peer() -> void:
+	session.host(FAKE_PORT)
+	session.join(FAKE_ADDRESS)
+	assert_null(session.host_peer)
+
+func test_host_writes_server_meta() -> void:
+	session.host(FAKE_PORT)
+	session.set_server_meta(&"round", 3)
+	assert_eq(session.get_server_meta(), {&"round": 3})
+
+func test_get_server_meta_returns_copy() -> void:
+	session.host(FAKE_PORT)
+	session.set_server_meta(&"round", 3)
+	var copy := session.get_server_meta()
+	copy[&"round"] = 99
+	assert_eq(session.get_server_meta()[&"round"], 3)
+
+func test_erase_server_meta() -> void:
+	session.host(FAKE_PORT)
+	session.set_server_meta(&"round", 3)
+	session.erase_server_meta(&"round")
+	assert_true(session.get_server_meta().is_empty())
+
+func test_host_writes_meta_for_authenticated_peer() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.set_peer_meta(4, &"team", "red")
+	assert_eq(session.get_peer_meta(4), {&"team": "red"})
+
+func test_peer_meta_ignored_before_authentication() -> void:
+	session.host(FAKE_PORT)
+	_connect_peer(4, FAKE_IP)
+	session.set_peer_meta(4, &"team", "red")
+	assert_true(session.get_peer_meta(4).is_empty())
+
+func test_host_peer_meta_under_host_identifier() -> void:
+	session.host(FAKE_PORT)
+	session.set_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER, &"motd", "hi")
+	assert_eq(session.get_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER), {&"motd": "hi"})
+
+func test_erase_peer_meta() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.set_peer_meta(4, &"team", "red")
+	session.erase_peer_meta(4, &"team")
+	assert_true(session.get_peer_meta(4).is_empty())
+
+func test_invalid_key_and_value_are_ignored() -> void:
+	session.host(FAKE_PORT)
+	session.set_server_meta("", 1)
+	session.set_server_meta(&"obj", RefCounted.new())
+	assert_true(session.get_server_meta().is_empty())
+
+func test_removing_peer_discards_its_meta() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.set_peer_meta(4, &"team", "red")
+	transport.peer_disconnected.emit(4, GdLinkCore.DisconnectReason.VOLUNTARY)
+	assert_true(session.get_peer_meta(4).is_empty())
+
+func test_client_meta_writes_are_ignored() -> void:
+	session.join(FAKE_ADDRESS)
+	session.set_server_meta(&"round", 3)
+	session.set_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER, &"motd", "hi")
+	assert_true(session.get_server_meta().is_empty())
+	assert_true(session.get_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER).is_empty())
