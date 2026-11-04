@@ -19,6 +19,16 @@ signal peer_authenticated(peer: Peer)
 signal peer_removed(peer: Peer, reason: GdLinkCore.DisconnectReason)
 ## Emitted when packet data is received.
 signal data_received(peer_identifier: int, channel: int, payload: PackedByteArray)
+## Client: server meta key set or changed.
+signal server_meta_changed(key: StringName, value: Variant)
+## Client: server meta key erased.
+signal server_meta_removed(key: StringName)
+## Client: peer meta key set or changed.
+signal peer_meta_changed(peer_identifier: int, key: StringName, value: Variant)
+## Client: peer meta key erased.
+signal peer_meta_removed(peer_identifier: int, key: StringName)
+## Client: host finished sending the meta snapshot.
+signal meta_synchronized
 
 ## Active transport.
 var transport: Transport
@@ -30,6 +40,10 @@ var is_hosting := false
 var is_client_authenticated := false
 ## Host only. Peer objects keyed by peer identifier.
 var peers: Dictionary = {}
+## Host only. Queued meta messages: peer_identifier -> {key: encoded message}. Flushed each frame.
+var pending_meta: Dictionary
+## Client only. Host-owned peer meta mirror, keyed by peer identifier.
+var remote_peer_meta: Dictionary
 ## Host only. Owns host-side peer meta under HOST_PEER_IDENTIFIER. Not in peers.
 var host_peer: Peer
 ## Server specific meta
@@ -37,6 +51,7 @@ var server_meta: Dictionary
 
 func _process(_delta: float) -> void:
 	if transport != null: transport.poll()
+	if is_hosting: _flush_meta()
 
 ## Returns the peer for peer_identifier, or null if unknown.
 func get_peer(peer_identifier: int) -> Peer:
@@ -71,6 +86,7 @@ func host(bind_address: String) -> Error:
 func join(join_address: String) -> Error:
 	is_hosting = false
 	host_peer = null
+	_clear_client_meta()
 	return transport.join(join_address)
 
 ## Client: closes the session with DisconnectReason.VOLUNTARY.
@@ -126,6 +142,8 @@ func _on_control_received(peer_identifier: int, payload: PackedByteArray) -> voi
 	elif message_type == ACCEPT_BYTE and payload.size() == ACCEPT_SIZE:
 		is_client_authenticated = true
 		join_succeeded.emit(payload.decode_u32(1))
+	elif is_client_authenticated and peer_identifier == GdLinkCore.HOST_PEER_IDENTIFIER:
+		_handle_host_meta(payload)
 
 ## Host: dispatches client control. Only HELLO is accepted from clients.
 func _handle_client_control(peer_identifier: int, message_type: int, body: PackedByteArray) -> void:
@@ -145,6 +163,7 @@ func _handle_hello(peer: Peer, body: PackedByteArray) -> void:
 		return
 	peer.mark_authenticated()
 	transport.send_control(peer.peer_identifier, _build_accept(peer.peer_identifier))
+	_send_meta_snapshot(peer.peer_identifier)
 	peer_authenticated.emit(peer)
 
 ## Host: drops the peer if it is still awaiting hello. Stale timers no-op.
@@ -157,9 +176,12 @@ func _on_peer_disconnected(peer_identifier: int, reason: GdLinkCore.DisconnectRe
 	if is_hosting:
 		var peer: Peer = peers.get(peer_identifier)
 		peers.erase(peer_identifier)
-		if peer != null: peer_removed.emit(peer, reason)
+		if peer != null:
+			_clear_peer_meta(peer)
+			peer_removed.emit(peer, reason)
 	elif is_client_authenticated:
 		is_client_authenticated = false
+		_clear_client_meta()
 		session_closed.emit(reason)
 	else:
 		join_failed.emit(reason)
@@ -175,39 +197,38 @@ func _build_accept(assigned_identifier: int) -> PackedByteArray:
 func get_server_meta() -> Dictionary:
 	return server_meta.duplicate(true)
 
-## Returns peer meta for peer_identifier, or an empty dictionary if unknown.
+## Returns peer meta for peer_identifier. Host reads authority, client reads its mirror.
 func get_peer_meta(peer_identifier: int) -> Dictionary:
+	if not is_hosting:
+		var mirrored: Dictionary = remote_peer_meta.get(peer_identifier, {})
+		return mirrored.duplicate(true)
 	var owner := _get_meta_owner(peer_identifier)
-	if owner != null:
-		return owner.meta.duplicate(true)
-	else:
-		return {}
+	return owner.meta.duplicate(true) if owner != null else {}
 
-## Host: sets a server meta value. Ignored with a warning on clients.
+## Host: sets a server meta value. Stores a deep copy so caller mutations cannot desync clients.
 func set_server_meta(key: StringName, value: Variant) -> void:
-	if not (_can_write_meta() && MetaCodec.is_valid_key(key) && MetaCodec.is_valid_value(value)):
-		return
-	server_meta[key] = value
+	if not _can_write_meta() or not MetaCodec.is_valid_key(key) or not MetaCodec.is_valid_value(value): return
+	server_meta[key] = bytes_to_var(var_to_bytes(value))
+	_queue_meta(0, key, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, key, value))
 
-## Host: erases a server meta key. Ignored with a warning on clients.
+## Host: erases a server meta key if present.
 func erase_server_meta(key: StringName) -> void:
-	if _can_write_meta():
-		server_meta.erase(key)
+	if _can_write_meta() and server_meta.erase(key):
+		_queue_meta(0, key, MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_SERVER_ERASE, 0, key))
 
 ## Host: sets a value on an authenticated peer's meta. Peer 1 is the host.
 func set_peer_meta(peer_identifier: int, key: StringName, value: Variant) -> void:
 	var owner := _get_meta_owner(peer_identifier)
-	if not (_can_write_meta() && owner != null && owner.is_authenticated()):
-		return
-	if not (MetaCodec.is_valid_key(key) && MetaCodec.is_valid_value(value)):
-		return
-	owner.meta[key] = value
+	if not _can_write_meta() or owner == null or not owner.is_authenticated(): return
+	if not MetaCodec.is_valid_key(key) or not MetaCodec.is_valid_value(value): return
+	owner.meta[key] = bytes_to_var(var_to_bytes(value))
+	_queue_meta(owner.peer_identifier, key, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, owner.peer_identifier, key, value))
 
-## Host: erases a key from a peer's meta. Ignored with a warning on clients.
+## Host: erases a key from a peer's meta if present.
 func erase_peer_meta(peer_identifier: int, key: StringName) -> void:
 	var owner := _get_meta_owner(peer_identifier)
-	if _can_write_meta() && owner != null:
-		owner.meta.erase(key)
+	if _can_write_meta() and owner != null and owner.meta.erase(key):
+		_queue_meta(owner.peer_identifier, key, MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_PEER_ERASE, owner.peer_identifier, key))
 
 func _can_write_meta() -> bool:
 	if is_hosting:
@@ -219,3 +240,68 @@ func _get_meta_owner(peer_identifier: int) -> Peer:
 	if peer_identifier == GdLinkCore.HOST_PEER_IDENTIFIER:
 		return host_peer
 	return get_peer(peer_identifier)
+
+## Host: stores the encoded message, overwriting any earlier pending change for the same key.
+func _queue_meta(peer_identifier: int, key: StringName, message: PackedByteArray) -> void:
+	if not pending_meta.has(peer_identifier): pending_meta[peer_identifier] = {}
+	pending_meta[peer_identifier][key] = message
+
+## Host: sends queued meta to authenticated peers in one pass, then clears the queue.
+func _flush_meta() -> void:
+	if pending_meta.is_empty(): return
+	var recipients := get_authenticated_peers()
+	for peer_identifier: int in pending_meta:
+		for message: PackedByteArray in pending_meta[peer_identifier].values():
+			for recipient: Peer in recipients:
+				transport.send_control(recipient.peer_identifier, message)
+	pending_meta.clear()
+
+## Host: queues erasure of every key a client may hold for a removed peer, and drops its pending sets.
+func _clear_peer_meta(peer: Peer) -> void:
+	var keys: Array = peer.meta.keys()
+	keys.append_array(pending_meta.get(peer.peer_identifier, {}).keys())
+	pending_meta.erase(peer.peer_identifier)
+	for key: StringName in keys:
+		_queue_meta(peer.peer_identifier, key, MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_PEER_ERASE, peer.peer_identifier, key))
+
+## Host: sends full meta state to one newly authenticated peer, then the end marker.
+func _send_meta_snapshot(peer_identifier: int) -> void:
+	for key: StringName in server_meta:
+		transport.send_control(peer_identifier, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, key, server_meta[key]))
+	var owners: Array[Peer] = [host_peer]
+	owners.append_array(get_authenticated_peers())
+	for owner: Peer in owners:
+		for key: StringName in owner.meta:
+			transport.send_control(peer_identifier, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, owner.peer_identifier, key, owner.meta[key]))
+	transport.send_control(peer_identifier, MetaCodec.encode_snapshot_end())
+
+## Client: applies one host meta message to the local mirror.
+func _handle_host_meta(payload: PackedByteArray) -> void:
+	var message := MetaCodec.decode(payload)
+	if message.is_empty(): return
+	var key: StringName = message.get("key", &"")
+	match message["type"]:
+		GdLinkCore.ControlMessage.META_SERVER_SET:
+			server_meta[key] = message["value"]
+			server_meta_changed.emit(key, message["value"])
+		GdLinkCore.ControlMessage.META_SERVER_ERASE:
+			server_meta.erase(key)
+			server_meta_removed.emit(key)
+		GdLinkCore.ControlMessage.META_PEER_SET:
+			_remote_meta_for(message["peer"])[key] = message["value"]
+			peer_meta_changed.emit(message["peer"], key, message["value"])
+		GdLinkCore.ControlMessage.META_PEER_ERASE:
+			_remote_meta_for(message["peer"]).erase(key)
+			peer_meta_removed.emit(message["peer"], key)
+		GdLinkCore.ControlMessage.META_SNAPSHOT_END:
+			meta_synchronized.emit()
+
+## Client: returns the mirror dictionary for peer_identifier, creating it if needed.
+func _remote_meta_for(peer_identifier: int) -> Dictionary:
+	if not remote_peer_meta.has(peer_identifier): remote_peer_meta[peer_identifier] = {}
+	return remote_peer_meta[peer_identifier]
+
+## Client: clears all mirrored meta.
+func _clear_client_meta() -> void:
+	server_meta.clear()
+	remote_peer_meta.clear()

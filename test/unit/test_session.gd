@@ -70,7 +70,7 @@ func test_replayed_hello_after_auth_is_ignored() -> void:
 	transport.control_received.emit(1, session._build_hello_message())
 	transport.control_received.emit(1, session._build_hello_message())
 	assert_signal_emit_count(session, "peer_authenticated", 1)
-	assert_eq(transport.sent_controls.size(), 1)
+	assert_eq(transport.sent_controls.size(), 2, "accept plus empty snapshot end")
 
 func test_timeout_disconnects_unauthenticated_peer() -> void:
 	session.host(FAKE_PORT)
@@ -238,3 +238,193 @@ func test_client_meta_writes_are_ignored() -> void:
 	session.set_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER, &"motd", "hi")
 	assert_true(session.get_server_meta().is_empty())
 	assert_true(session.get_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER).is_empty())
+
+func _flush_frame() -> void:
+	session._process(0.0)
+
+func _accept_payload(assigned_identifier: int) -> PackedByteArray:
+	var accept := PackedByteArray()
+	accept.resize(Session.ACCEPT_SIZE)
+	accept[0] = Session.ACCEPT_BYTE
+	accept.encode_u32(1, assigned_identifier)
+	return accept
+
+func _sent_to(peer_identifier: int) -> Array:
+	var payloads: Array = []
+	for entry: Array in transport.sent_controls:
+		if entry[0] == peer_identifier: payloads.append(entry[1])
+	return payloads
+
+func test_flush_sends_server_set_to_authenticated_peer() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	transport.sent_controls.clear()
+	session.set_server_meta(&"round", 3)
+	_flush_frame()
+	assert_eq(_sent_to(4), [MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3)])
+
+func test_flush_coalesces_last_write_per_key() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	transport.sent_controls.clear()
+	session.set_server_meta(&"round", 1)
+	session.set_server_meta(&"round", 2)
+	_flush_frame()
+	assert_eq(_sent_to(4), [MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 2)])
+
+func test_flush_clears_queue() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.set_server_meta(&"round", 1)
+	_flush_frame()
+	transport.sent_controls.clear()
+	_flush_frame()
+	assert_true(transport.sent_controls.is_empty())
+
+func test_flush_skips_unauthenticated_peer() -> void:
+	session.host(FAKE_PORT)
+	_connect_peer(9, FAKE_IP)
+	session.set_server_meta(&"round", 1)
+	_flush_frame()
+	assert_true(_sent_to(9).is_empty())
+
+func test_erase_server_meta_flushes_erase_message() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.set_server_meta(&"round", 1)
+	_flush_frame()
+	transport.sent_controls.clear()
+	session.erase_server_meta(&"round")
+	_flush_frame()
+	assert_eq(_sent_to(4), [MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_SERVER_ERASE, 0, &"round")])
+
+func test_erase_missing_key_queues_nothing() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	transport.sent_controls.clear()
+	session.erase_server_meta(&"missing")
+	_flush_frame()
+	assert_true(transport.sent_controls.is_empty())
+
+func test_snapshot_on_auth_contains_server_and_peer_meta() -> void:
+	session.host(FAKE_PORT)
+	session.set_server_meta(&"round", 3)
+	_authenticate_peer(4)
+	session.set_peer_meta(4, &"team", "red")
+	transport.sent_controls.clear()
+	_connect_peer(5, FAKE_IP)
+	transport.control_received.emit(5, session._build_hello_message())
+	var sent := _sent_to(5)
+	assert_eq(sent[0], session._build_accept(5))
+	assert_eq(sent[1], MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	assert_true(sent.has(MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, 4, &"team", "red")))
+	assert_eq(sent.back(), MetaCodec.encode_snapshot_end())
+
+func test_snapshot_includes_host_peer_meta() -> void:
+	session.host(FAKE_PORT)
+	session.set_peer_meta(GdLinkCore.HOST_PEER_IDENTIFIER, &"motd", "hi")
+	transport.sent_controls.clear()
+	_authenticate_peer(4)
+	assert_true(_sent_to(4).has(
+		MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, GdLinkCore.HOST_PEER_IDENTIFIER, &"motd", "hi")))
+
+func test_removed_peer_erases_its_keys_for_remaining_peers() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	_authenticate_peer(5)
+	session.set_peer_meta(4, &"team", "red")
+	_flush_frame()
+	transport.sent_controls.clear()
+	transport.peer_disconnected.emit(4, GdLinkCore.DisconnectReason.VOLUNTARY)
+	_flush_frame()
+	assert_eq(_sent_to(5), [MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_PEER_ERASE, 4, &"team")])
+	assert_true(_sent_to(4).is_empty())
+
+func test_removed_peer_drops_its_pending_sets() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	_authenticate_peer(5)
+	session.set_peer_meta(4, &"team", "red")
+	transport.peer_disconnected.emit(4, GdLinkCore.DisconnectReason.VOLUNTARY)
+	transport.sent_controls.clear()
+	_flush_frame()
+	assert_false(_sent_to(5).has(MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, 4, &"team", "red")))
+
+func test_stored_value_is_isolated_from_caller_mutation() -> void:
+	session.host(FAKE_PORT)
+	var loadout: Array = [1, 2]
+	session.set_server_meta(&"loadout", loadout)
+	loadout.append(3)
+	assert_eq(session.get_server_meta()[&"loadout"], [1, 2])
+
+func test_client_mirror_applies_server_set() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	watch_signals(session)
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	assert_eq(session.get_server_meta(), {&"round": 3})
+	assert_signal_emitted_with_parameters(session, "server_meta_changed", [&"round", 3])
+
+func test_client_mirror_applies_server_erase() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	watch_signals(session)
+	transport.control_received.emit(1, MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_SERVER_ERASE, 0, &"round"))
+	assert_true(session.get_server_meta().is_empty())
+	assert_signal_emitted_with_parameters(session, "server_meta_removed", [&"round"])
+
+func test_client_mirror_applies_peer_set_and_erase() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	watch_signals(session)
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, 4, &"team", "red"))
+	assert_eq(session.get_peer_meta(4), {&"team": "red"})
+	assert_signal_emitted_with_parameters(session, "peer_meta_changed", [4, &"team", "red"])
+	transport.control_received.emit(1, MetaCodec.encode_erase(GdLinkCore.ControlMessage.META_PEER_ERASE, 4, &"team"))
+	assert_true(session.get_peer_meta(4).is_empty())
+	assert_signal_emitted_with_parameters(session, "peer_meta_removed", [4, &"team"])
+
+func test_client_ignores_meta_before_accept() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	assert_true(session.get_server_meta().is_empty())
+
+func test_client_ignores_meta_from_non_host_peer() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	transport.control_received.emit(5, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	assert_true(session.get_server_meta().is_empty())
+
+func test_client_snapshot_end_emits_meta_synchronized() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	watch_signals(session)
+	transport.control_received.emit(1, MetaCodec.encode_snapshot_end())
+	assert_signal_emitted(session, "meta_synchronized")
+
+func test_client_mirror_cleared_on_session_closed() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, 4, &"team", "red"))
+	transport.peer_disconnected.emit(1, GdLinkCore.DisconnectReason.KICKED)
+	assert_true(session.get_server_meta().is_empty())
+	assert_true(session.get_peer_meta(4).is_empty())
+
+func test_client_getters_return_copies() -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(7))
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	var copy := session.get_server_meta()
+	copy[&"round"] = 99
+	assert_eq(session.get_server_meta()[&"round"], 3)
+
+func test_client_sent_meta_is_not_applied_on_host() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	transport.control_received.emit(4, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 99))
+	transport.control_received.emit(4, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, 4, &"team", "red"))
+	assert_true(session.get_server_meta().is_empty())
+	assert_true(session.get_peer_meta(4).is_empty())
+	assert_true(transport.disconnected_calls.is_empty())
