@@ -29,6 +29,8 @@ signal peer_meta_changed(peer_identifier: int, key: StringName, value: Variant)
 signal peer_meta_removed(peer_identifier: int, key: StringName)
 ## Client: host finished sending the meta snapshot.
 signal meta_synchronized
+## Emitted each sample tick for each peer that has a sample.
+signal metrics_sampled(peer_identifier: int, sample: Dictionary)
 
 ## Active transport.
 var transport: Transport
@@ -48,10 +50,14 @@ var remote_peer_meta: Dictionary
 var host_peer: Peer
 ## Server specific meta
 var server_meta: Dictionary
+## Runtime metrics sampler. Mode is set with set_metrics_mode().
+var metrics := GdLinkMetrics.new()
+var metrics_accumulator := 0.0
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if transport != null: transport.poll()
 	if is_hosting: _flush_meta()
+	_tick_metrics(delta)
 
 ## Returns the peer for peer_identifier, or null if unknown.
 func get_peer(peer_identifier: int) -> Peer:
@@ -77,6 +83,7 @@ func setup(transport_instance: Transport, authenticator_instance: Authenticator)
 
 ## Starts hosting on bind_address. Returns the transport's error code.
 func host(bind_address: String) -> Error:
+	metrics.clear()
 	is_hosting = true
 	host_peer = Peer.new(GdLinkCore.HOST_PEER_IDENTIFIER, "")
 	host_peer.mark_authenticated()
@@ -84,6 +91,7 @@ func host(bind_address: String) -> Error:
 
 ## Joins the host at join_address. Returns the transport's error code.
 func join(join_address: String) -> Error:
+	metrics.clear()
 	is_hosting = false
 	host_peer = null
 	_clear_client_meta()
@@ -176,11 +184,13 @@ func _on_peer_disconnected(peer_identifier: int, reason: GdLinkCore.DisconnectRe
 	if is_hosting:
 		var peer: Peer = peers.get(peer_identifier)
 		peers.erase(peer_identifier)
+		metrics.forget_peer(peer_identifier)
 		if peer != null:
 			_clear_peer_meta(peer)
 			peer_removed.emit(peer, reason)
 	elif is_client_authenticated:
 		is_client_authenticated = false
+		metrics.forget_peer(GdLinkCore.HOST_PEER_IDENTIFIER)
 		_clear_client_meta()
 		session_closed.emit(reason)
 	else:
@@ -305,3 +315,34 @@ func _remote_meta_for(peer_identifier: int) -> Dictionary:
 func _clear_client_meta() -> void:
 	server_meta.clear()
 	remote_peer_meta.clear()
+
+## Sets which metrics are collected. OFF disables sampling.
+func set_metrics_mode(mode: GdLinkMetrics.Mode) -> void:
+	metrics.set_mode(mode)
+	metrics_accumulator = 0.0
+
+## Returns {latest, average, min, max} for peer_identifier. Empty if unknown.
+func get_metrics(peer_identifier: int) -> Dictionary:
+	return metrics.get_snapshot(peer_identifier)
+
+func _tick_metrics(delta: float) -> void:
+	if not metrics.is_enabled():
+		return
+	metrics_accumulator += delta
+	if metrics_accumulator < GdLinkMetrics.SAMPLE_INTERVAL_SECONDS:
+		return
+	metrics_accumulator -= GdLinkMetrics.SAMPLE_INTERVAL_SECONDS
+	for peer_identifier: int in _get_metric_peer_identifiers():
+		var sample := metrics.sample_peer(transport, peer_identifier)
+		if not sample.is_empty():
+			metrics_sampled.emit(peer_identifier, sample)
+
+func _get_metric_peer_identifiers() -> Array[int]:
+	var identifiers: Array[int] = []
+	if not is_hosting:
+		if is_client_authenticated:
+			identifiers.append(GdLinkCore.HOST_PEER_IDENTIFIER)
+		return identifiers
+	for peer: Peer in get_authenticated_peers():
+		identifiers.append(peer.peer_identifier)
+	return identifiers

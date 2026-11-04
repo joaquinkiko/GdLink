@@ -4,6 +4,7 @@ extends Transport
 
 const CHANNEL_COUNT: int = GdLinkCore.CHANNEL_GDLINK + 1
 const MAX_PEERS := 32
+const PACKET_LOSS_SCALE := 65536.0
 
 var connection: ENetConnection
 var is_hosting := false
@@ -66,7 +67,8 @@ func send_control(peer_identifier: int, payload: PackedByteArray) -> void:
 	var packet_peer: ENetPacketPeer = packet_peers_by_identifier.get(peer_identifier)
 	if packet_peer == null:
 		return
-	packet_peer.send(GdLinkCore.CHANNEL_GDLINK, payload, ENetPacketPeer.FLAG_RELIABLE)
+	if packet_peer.send(GdLinkCore.CHANNEL_GDLINK, payload, ENetPacketPeer.FLAG_RELIABLE) == OK:
+		_record_sent(peer_identifier, payload.size())
 
 func send_data(peer_identifier: int, channel: int, payload: PackedByteArray, reliable: bool) -> void:
 	var packet_peer: ENetPacketPeer = packet_peers_by_identifier.get(peer_identifier)
@@ -74,7 +76,8 @@ func send_data(peer_identifier: int, channel: int, payload: PackedByteArray, rel
 		return
 	var flags := ENetPacketPeer.FLAG_UNSEQUENCED
 	if reliable: flags = ENetPacketPeer.FLAG_RELIABLE
-	packet_peer.send(channel, payload, flags)
+	if packet_peer.send(channel, payload, flags) == OK:
+		_record_sent(peer_identifier, payload.size())
 
 func get_identity(peer_identifier: int) -> String:
 	var packet_peer: ENetPacketPeer = packet_peers_by_identifier.get(peer_identifier)
@@ -82,6 +85,15 @@ func get_identity(peer_identifier: int) -> String:
 		return packet_peer.get_remote_address()
 	else:
 		return ""
+
+func get_link_stats(peer_identifier: int) -> Dictionary:
+	var packet_peer: ENetPacketPeer = packet_peers_by_identifier.get(peer_identifier)
+	if packet_peer == null:
+		return {}
+	return {
+		"rtt_msec": packet_peer.get_statistic(ENetPacketPeer.PEER_ROUND_TRIP_TIME),
+		"loss": packet_peer.get_statistic(ENetPacketPeer.PEER_PACKET_LOSS) / PACKET_LOSS_SCALE,
+	}
 
 ## Handle received [param event]
 func _handle_event(event: Array) -> void:
@@ -128,11 +140,13 @@ func _on_disconnect(packet_peer: ENetPacketPeer, remote_reason: int) -> void:
 ## Handle received packet [param event]
 func _on_receive(packet_peer: ENetPacketPeer, event: Array) -> void:
 	var payload := packet_peer.get_packet()
+	var peer_identifier: int = identifiers_by_packet_peer.get(packet_peer, 0)
+	_record_received(peer_identifier, payload.size())
 	match event[3]:
 		GdLinkCore.CHANNEL_GDLINK:
-			control_received.emit(identifiers_by_packet_peer.get(packet_peer, 0), payload)
+			control_received.emit(peer_identifier, payload)
 		_:
-			data_received.emit(identifiers_by_packet_peer.get(packet_peer, 0), event[3], payload)
+			data_received.emit(peer_identifier, event[3], payload)
 
 ## Register a new [param packet_peer]
 func _register(packet_peer: ENetPacketPeer) -> int:
@@ -147,6 +161,7 @@ func _forget(peer_identifier: int, packet_peer: ENetPacketPeer) -> void:
 	packet_peers_by_identifier.erase(peer_identifier)
 	identifiers_by_packet_peer.erase(packet_peer)
 	local_reasons_by_identifier.erase(peer_identifier)
+	traffic_counters.erase(peer_identifier)
 
 ## Call [method _destroy_connection if connection is closed
 func _destroy_if_closed() -> void:
@@ -162,3 +177,4 @@ func _destroy_connection() -> void:
 	packet_peers_by_identifier.clear()
 	identifiers_by_packet_peer.clear()
 	local_reasons_by_identifier.clear()
+	traffic_counters.clear()
