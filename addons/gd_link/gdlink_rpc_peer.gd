@@ -10,7 +10,7 @@ var current_packet: Dictionary = {}
 var target_peer_identifier := 0
 var _transfer_mode := MultiplayerPeer.TRANSFER_MODE_RELIABLE
 var _transfer_channel := 0
-var unique_identifier := 1
+var unique_identifier := 0
 var status := MultiplayerPeer.CONNECTION_CONNECTING # Start as CONNECTING so engine doesn't reject
 var refuse_connections := false
 
@@ -27,6 +27,9 @@ func _init(session_instance: Session) -> void:
 	session.join_failed.connect(_on_session_lost)
 	session.session_closed.connect(func(_reason: GdLinkCore.DisconnectReason) -> void:
 		_on_session_lost()
+		)
+	session.hosting_stopped.connect(func() -> void:
+		status = MultiplayerPeer.CONNECTION_DISCONNECTED
 		)
 
 func _on_join_succeeded(assigned_identifier: int) -> void:
@@ -91,7 +94,10 @@ func _get_max_packet_size() -> int:
 	return GdLinkCore.MAX_PAYLOAD_BYTES
 
 func _get_unique_id() -> int:
-	return unique_identifier
+	if session.is_hosting:
+		return GdLinkCore.HOST_PEER_IDENTIFIER
+	else:
+		return unique_identifier
 
 func _get_connection_status() -> MultiplayerPeer.ConnectionStatus:
 	if session != null && session.is_hosting:

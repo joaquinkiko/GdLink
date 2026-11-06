@@ -37,6 +37,8 @@ signal scene_ready(epoch: int)
 signal scene_changed(scene: String, args: Dictionary)
 ## Host: host has not confirmed the scene within the timeout. Barrier stays open; game decides next steps.
 signal scene_load_stalled(epoch: int)
+## Host: emitted once the host has closed and all peers are gone.
+signal hosting_stopped
 
 ## Active transport.
 var transport: Transport
@@ -65,6 +67,8 @@ var metrics_accumulator := 0.0
 var local_identifier := 0
 ## Host: timeout applied to the open barrier.
 var scene_timeout_seconds := 0.0
+## True if we are stopping hosting
+var is_stopping_host := false
 
 func _process(delta: float) -> void:
 	if transport != null: transport.poll()
@@ -112,6 +116,8 @@ func join(join_address: String) -> Error:
 
 ## Client: closes the session with DisconnectReason.VOLUNTARY.
 func leave() -> void:
+	if is_hosting || transport == null:
+		return
 	transport.close(GdLinkCore.DisconnectReason.VOLUNTARY)
 
 ## Host: disconnects a peer with reason. No-op on clients.
@@ -208,6 +214,8 @@ func _on_peer_disconnected(peer_identifier: int, reason: GdLinkCore.DisconnectRe
 			peer_removed.emit(peer, reason)
 		if scene_gate.remove_peer(peer_identifier):
 			_check_scene_barrier()
+		if is_stopping_host and peers.is_empty():
+			_finish_hosting()
 	elif is_client_authenticated:
 		is_client_authenticated = false
 		scene_gate.close()
@@ -468,3 +476,22 @@ func _on_host_load_timeout(timeout_epoch: int) -> void:
 	if not (timeout_epoch == scene_gate.epoch && scene_gate.is_pending(GdLinkCore.HOST_PEER_IDENTIFIER)):
 		return
 	scene_load_stalled.emit(timeout_epoch)
+
+## Host: disconnects all peers. Host state resets after the last peer disconnect event.
+func stop_hosting() -> void:
+	if not is_hosting || is_stopping_host:
+		return
+	is_stopping_host = true
+	transport.close(GdLinkCore.DisconnectReason.VOLUNTARY)
+	if peers.is_empty():
+		_finish_hosting()
+
+func _finish_hosting() -> void:
+	is_hosting = false
+	is_stopping_host = false
+	host_peer = null
+	server_meta.clear()
+	pending_meta.clear()
+	scene_gate.close()
+	metrics.clear()
+	hosting_stopped.emit()
