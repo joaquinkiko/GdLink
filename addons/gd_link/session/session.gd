@@ -31,11 +31,15 @@ signal peer_meta_removed(peer_identifier: int, key: StringName)
 signal meta_synchronized
 ## Emitted each sample tick for each peer that has a sample.
 signal metrics_sampled(peer_identifier: int, sample: Dictionary)
+## Host and client: scene barrier completed for epoch.
+signal scene_ready(epoch: int)
 
 ## Active transport.
 var transport: Transport
 ## Active authenticator.
 var authenticator: Authenticator
+## Scene barrier. Host owns the epoch and pending set.
+var scene_gate := SceneGate.new()
 ## True if currently hosting.
 var is_hosting := false
 ## Client only. True once the host accepts the hello.
@@ -346,3 +350,44 @@ func _get_metric_peer_identifiers() -> Array[int]:
 	for peer: Peer in get_authenticated_peers():
 		identifiers.append(peer.peer_identifier)
 	return identifiers
+
+## Host: opens a scene barrier. Returns ERR_BUSY while one is open.
+func swap_scene(scene: String, args: Dictionary) -> Error:
+	if !is_hosting:
+		return ERR_UNAUTHORIZED
+	if scene_gate.is_open:
+		return ERR_BUSY
+	if not (SceneCodec.is_valid_scene(scene) && SceneCodec.is_valid_args(args)):
+		return ERR_INVALID_PARAMETER
+	var members: Array[int] = [GdLinkCore.HOST_PEER_IDENTIFIER]
+	for peer: Peer in get_authenticated_peers():
+		members.append(peer.peer_identifier)
+	scene_gate.begin_swap(scene, args, members)
+	_broadcast_scene_set()
+	_check_scene_barrier()
+	return OK
+
+func _broadcast_scene_set() -> void:
+	var message := SceneCodec.encode_set(scene_gate.epoch, scene_gate.current_scene, scene_gate.current_args)
+	for peer: Peer in get_authenticated_peers():
+		transport.send_control(peer.peer_identifier, message)
+
+## Host: closes the barrier and broadcasts SCENE_READY once every member has confirmed.
+func _check_scene_barrier() -> void:
+	if !scene_gate.is_complete():
+		return
+	var completed_epoch := scene_gate.epoch
+	scene_gate.close()
+	var message := SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, completed_epoch)
+	for peer: Peer in get_authenticated_peers():
+		transport.send_control(peer.peer_identifier, message)
+	scene_ready.emit(completed_epoch)
+
+## Host and client: call once the scene has loaded. Host confirms itself.
+func confirm_scene_loaded() -> void:
+	if is_hosting:
+		_confirm_scene(GdLinkCore.HOST_PEER_IDENTIFIER, scene_gate.epoch)
+
+func _confirm_scene(peer_identifier: int, confirm_epoch: int) -> void:
+	if scene_gate.confirm(peer_identifier, confirm_epoch):
+		_check_scene_barrier()

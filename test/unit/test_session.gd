@@ -428,3 +428,39 @@ func test_client_sent_meta_is_not_applied_on_host() -> void:
 	assert_true(session.get_server_meta().is_empty())
 	assert_true(session.get_peer_meta(4).is_empty())
 	assert_true(transport.disconnected_calls.is_empty())
+
+func test_swap_rejected_on_client() -> void:
+	session.join(FAKE_ADDRESS)
+	assert_eq(session.swap_scene("arena", {}), ERR_UNAUTHORIZED)
+
+func test_second_swap_returns_busy() -> void:
+	session.host(FAKE_PORT)
+	assert_eq(session.swap_scene("arena", {}), OK)
+	assert_eq(session.swap_scene("lobby", {}), ERR_BUSY)
+
+func test_invalid_scene_rejected() -> void:
+	session.host(FAKE_PORT)
+	assert_eq(session.swap_scene("", {}), ERR_INVALID_PARAMETER)
+
+func test_swap_sends_scene_set_with_new_epoch() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	transport.sent_controls.clear()
+	session.swap_scene("arena", {&"mode": 1})
+	assert_eq(_sent_to(4), [SceneCodec.encode_set(1, "arena", {&"mode": 1})])
+
+func test_barrier_waits_for_host_and_all_clients() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {})
+	watch_signals(session)
+	session.confirm_scene_loaded()
+	assert_signal_not_emitted(session, "scene_ready")
+	session._confirm_scene(4, 1)
+	assert_signal_emitted_with_parameters(session, "scene_ready", [1])
+
+func test_host_confirm_without_open_barrier_is_noop() -> void:
+	session.host(FAKE_PORT)
+	watch_signals(session)
+	session.confirm_scene_loaded()
+	assert_signal_not_emitted(session, "scene_ready")
