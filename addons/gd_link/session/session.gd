@@ -35,6 +35,8 @@ signal metrics_sampled(peer_identifier: int, sample: Dictionary)
 signal scene_ready(epoch: int)
 ## Client: scene set by the host.
 signal scene_changed(scene: String, args: Dictionary)
+## Host: host has not confirmed the scene within the timeout. Barrier stays open; game decides next steps.
+signal scene_load_stalled(epoch: int)
 
 ## Active transport.
 var transport: Transport
@@ -61,6 +63,8 @@ var metrics := GdLinkMetrics.new()
 var metrics_accumulator := 0.0
 ## Client: identifier assigned by the host.
 var local_identifier := 0
+## Host: timeout applied to the open barrier.
+var scene_timeout_seconds := 0.0
 
 func _process(delta: float) -> void:
 	if transport != null: transport.poll()
@@ -202,6 +206,8 @@ func _on_peer_disconnected(peer_identifier: int, reason: GdLinkCore.DisconnectRe
 		if peer != null:
 			_clear_peer_meta(peer)
 			peer_removed.emit(peer, reason)
+		if scene_gate.remove_peer(peer_identifier):
+			_check_scene_barrier()
 	elif is_client_authenticated:
 		is_client_authenticated = false
 		scene_gate.close()
@@ -295,6 +301,7 @@ func _send_meta_snapshot(peer_identifier: int) -> void:
 		transport.send_control(peer_identifier,
 			SceneCodec.encode_set(scene_gate.epoch, scene_gate.current_scene, scene_gate.current_args))
 		scene_gate.add_pending(peer_identifier)
+		_start_load_timeout(peer_identifier)
 	for key: StringName in server_meta:
 		transport.send_control(peer_identifier, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, key, server_meta[key]))
 	var owners: Array[Peer] = [host_peer]
@@ -367,7 +374,7 @@ func _get_metric_peer_identifiers() -> Array[int]:
 	return identifiers
 
 ## Host: opens a scene barrier. Returns ERR_BUSY while one is open.
-func swap_scene(scene: String, args: Dictionary) -> Error:
+func swap_scene(scene: String, args: Dictionary, timeout_seconds := GdLinkCore.SCENE_LOAD_TIMEOUT_SECONDS) -> Error:
 	if !is_hosting:
 		return ERR_UNAUTHORIZED
 	if scene_gate.is_open:
@@ -378,8 +385,14 @@ func swap_scene(scene: String, args: Dictionary) -> Error:
 	for peer: Peer in get_authenticated_peers():
 		members.append(peer.peer_identifier)
 	scene_gate.begin_swap(scene, args, members)
+	scene_timeout_seconds = timeout_seconds
 	_broadcast_scene_set()
+	for peer: Peer in get_authenticated_peers():
+		_start_load_timeout(peer.peer_identifier)
 	_check_scene_barrier()
+	get_tree().create_timer(scene_timeout_seconds).timeout.connect(
+		_on_host_load_timeout.bind(scene_gate.epoch)
+		)
 	return OK
 
 func _broadcast_scene_set() -> void:
@@ -439,3 +452,19 @@ func _handle_scene_loaded(peer_identifier: int, payload: PackedByteArray) -> voi
 	if message.is_empty():
 		return
 	_confirm_scene(peer_identifier, message["epoch"])
+
+func _start_load_timeout(peer_identifier: int) -> void:
+	get_tree().create_timer(scene_timeout_seconds).timeout.connect(
+		_on_scene_load_timeout.bind(scene_gate.epoch, peer_identifier))
+
+## Host: kicks a peer still pending on the same epoch. Stale timers no-op.
+func _on_scene_load_timeout(timeout_epoch: int, peer_identifier: int) -> void:
+	if not (timeout_epoch == scene_gate.epoch && scene_gate.is_pending(peer_identifier)):
+		return
+	transport.disconnect_peer(peer_identifier, GdLinkCore.DisconnectReason.SCENE_LOAD_TIMEOUT)
+
+## Host: emits once per epoch when the host itself is still pending. Takes no other action.
+func _on_host_load_timeout(timeout_epoch: int) -> void:
+	if not (timeout_epoch == scene_gate.epoch && scene_gate.is_pending(GdLinkCore.HOST_PEER_IDENTIFIER)):
+		return
+	scene_load_stalled.emit(timeout_epoch)

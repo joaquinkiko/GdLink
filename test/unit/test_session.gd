@@ -584,3 +584,68 @@ func test_client_meta_flows_during_loading() -> void:
 	transport.control_received.emit(1, SceneCodec.encode_set(1, "arena", {}))
 	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
 	assert_eq(session.get_server_meta(), {&"round": 3})
+
+func test_timeout_kicks_pending_peer() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {}, 5.0)
+	session._on_scene_load_timeout(1, 4)
+	assert_eq(transport.disconnected_calls, [[4, GdLinkCore.DisconnectReason.SCENE_LOAD_TIMEOUT]])
+
+func test_stale_epoch_timeout_is_noop() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {}, 5.0)
+	session._on_scene_load_timeout(0, 4)
+	assert_true(transport.disconnected_calls.is_empty())
+
+func test_completed_peer_not_kicked() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {}, 5.0)
+	session.confirm_scene_loaded()
+	session._confirm_scene(4, 1)
+	session._on_scene_load_timeout(1, 4)
+	assert_true(transport.disconnected_calls.is_empty())
+
+func test_pending_peer_disconnect_completes_barrier() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {}, 5.0)
+	session.confirm_scene_loaded()
+	watch_signals(session)
+	transport.peer_disconnected.emit(4, GdLinkCore.DisconnectReason.VOLUNTARY)
+	assert_signal_emitted_with_parameters(session, "scene_ready", [1])
+
+func test_disconnect_after_completion_is_noop() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {}, 5.0)
+	session.confirm_scene_loaded()
+	session._confirm_scene(4, 1)
+	watch_signals(session)
+	transport.peer_disconnected.emit(4, GdLinkCore.DisconnectReason.VOLUNTARY)
+	assert_signal_not_emitted(session, "scene_ready")
+
+func test_stall_signal_fires_when_host_unconfirmed() -> void:
+	session.host(FAKE_PORT)
+	session.swap_scene("arena", {}, 5.0)
+	watch_signals(session)
+	session._on_host_load_timeout(1)
+	assert_signal_emitted_with_parameters(session, "scene_load_stalled", [1])
+	assert_eq(session.swap_scene("lobby", {}), ERR_BUSY)
+
+func test_stall_signal_skipped_after_host_confirms() -> void:
+	session.host(FAKE_PORT)
+	session.swap_scene("arena", {}, 5.0)
+	session.confirm_scene_loaded()
+	watch_signals(session)
+	session._on_host_load_timeout(1)
+	assert_signal_not_emitted(session, "scene_load_stalled")
+
+func test_stall_signal_ignores_stale_epoch() -> void:
+	session.host(FAKE_PORT)
+	session.swap_scene("arena", {}, 5.0)
+	watch_signals(session)
+	session._on_host_load_timeout(0)
+	assert_signal_not_emitted(session, "scene_load_stalled")

@@ -11,6 +11,9 @@ const MAX_PAYLOAD_BYTES := 4096
 ## Time before dropping unauthenticated peer
 const AUTHENTICATION_TIMEOUT_SECONDS := 10.0
 
+## Time for every peer to confirm a scene load
+const SCENE_LOAD_TIMEOUT_SECONDS := 30.0
+
 ## Rate-limit on failed authenication attempts per player identity
 const AUTHENTICATION_ATTEMPTS_PER_MINUTE := 5
 
