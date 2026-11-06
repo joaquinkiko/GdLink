@@ -464,3 +464,38 @@ func test_host_confirm_without_open_barrier_is_noop() -> void:
 	watch_signals(session)
 	session.confirm_scene_loaded()
 	assert_signal_not_emitted(session, "scene_ready")
+
+func _join_accepted(assigned_identifier: int) -> void:
+	session.join(FAKE_ADDRESS)
+	transport.control_received.emit(1, _accept_payload(assigned_identifier))
+
+func test_client_set_adopts_scene_and_emits() -> void:
+	_join_accepted(7)
+	watch_signals(session)
+	transport.control_received.emit(1, SceneCodec.encode_set(3, "arena", {&"mode": 1}))
+	assert_signal_emitted_with_parameters(session, "scene_changed", ["arena", {&"mode": 1}])
+	assert_true(session.scene_gate.is_open)
+
+func test_client_confirm_sends_scene_loaded_with_epoch() -> void:
+	_join_accepted(7)
+	transport.control_received.emit(1, SceneCodec.encode_set(3, "arena", {}))
+	transport.sent_controls.clear()
+	session.confirm_scene_loaded()
+	assert_eq(transport.sent_controls,
+		[[1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 3)]])
+
+func test_ready_with_wrong_epoch_ignored() -> void:
+	_join_accepted(7)
+	transport.control_received.emit(1, SceneCodec.encode_set(3, "arena", {}))
+	watch_signals(session)
+	transport.control_received.emit(1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, 2))
+	assert_signal_not_emitted(session, "scene_ready")
+	assert_true(session.scene_gate.is_open)
+
+func test_ready_with_matching_epoch_releases_gate() -> void:
+	_join_accepted(7)
+	transport.control_received.emit(1, SceneCodec.encode_set(3, "arena", {}))
+	watch_signals(session)
+	transport.control_received.emit(1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, 3))
+	assert_signal_emitted_with_parameters(session, "scene_ready", [3])
+	assert_false(session.scene_gate.is_open)

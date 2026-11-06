@@ -33,6 +33,8 @@ signal meta_synchronized
 signal metrics_sampled(peer_identifier: int, sample: Dictionary)
 ## Host and client: scene barrier completed for epoch.
 signal scene_ready(epoch: int)
+## Client: scene set by the host.
+signal scene_changed(scene: String, args: Dictionary)
 
 ## Active transport.
 var transport: Transport
@@ -57,6 +59,8 @@ var server_meta: Dictionary
 ## Runtime metrics sampler. Mode is set with set_metrics_mode().
 var metrics := GdLinkMetrics.new()
 var metrics_accumulator := 0.0
+## Client: identifier assigned by the host.
+var local_identifier := 0
 
 func _process(delta: float) -> void:
 	if transport != null: transport.poll()
@@ -99,6 +103,7 @@ func join(join_address: String) -> Error:
 	is_hosting = false
 	host_peer = null
 	_clear_client_meta()
+	scene_gate.close()
 	return transport.join(join_address)
 
 ## Client: closes the session with DisconnectReason.VOLUNTARY.
@@ -153,9 +158,10 @@ func _on_control_received(peer_identifier: int, payload: PackedByteArray) -> voi
 		_handle_client_control(peer_identifier, message_type, payload.slice(1))
 	elif message_type == ACCEPT_BYTE and payload.size() == ACCEPT_SIZE:
 		is_client_authenticated = true
-		join_succeeded.emit(payload.decode_u32(1))
+		local_identifier = payload.decode_u32(1)
+		join_succeeded.emit(local_identifier)
 	elif is_client_authenticated and peer_identifier == GdLinkCore.HOST_PEER_IDENTIFIER:
-		_handle_host_meta(payload)
+		_handle_host_message(payload)
 
 ## Host: dispatches client control. Only HELLO is accepted from clients.
 func _handle_client_control(peer_identifier: int, message_type: int, body: PackedByteArray) -> void:
@@ -194,6 +200,7 @@ func _on_peer_disconnected(peer_identifier: int, reason: GdLinkCore.DisconnectRe
 			peer_removed.emit(peer, reason)
 	elif is_client_authenticated:
 		is_client_authenticated = false
+		scene_gate.close()
 		metrics.forget_peer(GdLinkCore.HOST_PEER_IDENTIFIER)
 		_clear_client_meta()
 		session_closed.emit(reason)
@@ -387,7 +394,33 @@ func _check_scene_barrier() -> void:
 func confirm_scene_loaded() -> void:
 	if is_hosting:
 		_confirm_scene(GdLinkCore.HOST_PEER_IDENTIFIER, scene_gate.epoch)
+	elif scene_gate.is_open:
+		transport.send_control(GdLinkCore.HOST_PEER_IDENTIFIER,
+			SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, scene_gate.epoch))
 
 func _confirm_scene(peer_identifier: int, confirm_epoch: int) -> void:
 	if scene_gate.confirm(peer_identifier, confirm_epoch):
 		_check_scene_barrier()
+
+## Client: routes host messages to scene or meta handlers.
+func _handle_host_message(payload: PackedByteArray) -> void:
+	var message_type := payload[0]
+	if message_type == GdLinkCore.ControlMessage.SCENE_SET:
+		_handle_scene_set(payload)
+	elif message_type == GdLinkCore.ControlMessage.SCENE_READY:
+		_handle_scene_ready(payload)
+	else:
+		_handle_host_meta(payload)
+
+func _handle_scene_set(payload: PackedByteArray) -> void:
+	var message := SceneCodec.decode(payload)
+	if message.is_empty():
+		return
+	scene_gate.adopt_swap(message["epoch"], message["scene"], message["args"], local_identifier)
+	scene_changed.emit(message["scene"], message["args"])
+
+func _handle_scene_ready(payload: PackedByteArray) -> void:
+	var message := SceneCodec.decode(payload)
+	if message.is_empty() || not (scene_gate.is_open && message["epoch"] == scene_gate.epoch): return
+	scene_gate.close()
+	scene_ready.emit(message["epoch"])

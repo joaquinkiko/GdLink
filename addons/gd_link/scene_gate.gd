@@ -37,3 +37,11 @@ func is_complete() -> bool:
 func close() -> void:
 	is_open = false
 	pending_identifiers.clear()
+
+## Client: adopts the host's epoch and scene, waiting only on the local peer.
+func adopt_swap(new_epoch: int, scene: String, args: Dictionary, local_identifier: int) -> void:
+	epoch = new_epoch
+	current_scene = scene
+	current_args = args.duplicate(true)
+	pending_identifiers = {local_identifier: true}
+	is_open = true
