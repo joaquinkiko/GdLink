@@ -45,3 +45,7 @@ func adopt_swap(new_epoch: int, scene: String, args: Dictionary, local_identifie
 	current_args = args.duplicate(true)
 	pending_identifiers = {local_identifier: true}
 	is_open = true
+
+## Adds a late joiner to an open barrier.
+func add_pending(peer_identifier: int) -> void:
+	if is_open: pending_identifiers[peer_identifier] = true

@@ -499,3 +499,58 @@ func test_ready_with_matching_epoch_releases_gate() -> void:
 	transport.control_received.emit(1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, 3))
 	assert_signal_emitted_with_parameters(session, "scene_ready", [3])
 	assert_false(session.scene_gate.is_open)
+
+func _open_swap_two_clients() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	_authenticate_peer(5)
+	session.swap_scene("arena", {})
+	session.confirm_scene_loaded()
+
+func test_valid_confirm_removes_peer_from_barrier() -> void:
+	_open_swap_two_clients()
+	transport.control_received.emit(4, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_false(session.scene_gate.is_pending(4))
+	assert_true(session.scene_gate.is_pending(5))
+
+func test_duplicate_confirm_ignored() -> void:
+	_open_swap_two_clients()
+	var confirm := SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1)
+	transport.control_received.emit(4, confirm)
+	watch_signals(session)
+	transport.control_received.emit(4, confirm)
+	assert_signal_not_emitted(session, "scene_ready")
+	assert_true(session.scene_gate.is_pending(5))
+
+func test_wrong_epoch_confirm_ignored() -> void:
+	_open_swap_two_clients()
+	transport.control_received.emit(4, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 9))
+	assert_true(session.scene_gate.is_pending(4))
+
+func test_unknown_sender_ignored_without_kick() -> void:
+	_open_swap_two_clients()
+	transport.control_received.emit(9, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_true(transport.disconnected_calls.is_empty())
+	assert_true(session.scene_gate.is_pending(4))
+
+func test_late_joiner_receives_pending_scene_and_joins_barrier() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {})
+	session.confirm_scene_loaded()
+	transport.sent_controls.clear()
+	_authenticate_peer(5)
+	assert_true(_sent_to(5).has(SceneCodec.encode_set(1, "arena", {})))
+	assert_true(session.scene_gate.is_pending(5))
+
+func test_late_joiner_must_confirm_before_completion() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {})
+	session.confirm_scene_loaded()
+	_authenticate_peer(5)
+	watch_signals(session)
+	session._confirm_scene(4, 1)
+	assert_signal_not_emitted(session, "scene_ready")
+	session._confirm_scene(5, 1)
+	assert_signal_emitted_with_parameters(session, "scene_ready", [1])

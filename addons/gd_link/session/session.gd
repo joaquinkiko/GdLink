@@ -155,7 +155,10 @@ func _on_control_received(peer_identifier: int, payload: PackedByteArray) -> voi
 	if payload.is_empty(): return
 	var message_type := payload[0]
 	if is_hosting:
-		_handle_client_control(peer_identifier, message_type, payload.slice(1))
+		if message_type == GdLinkCore.ControlMessage.SCENE_LOADED:
+			_handle_scene_loaded(peer_identifier, payload)
+		else:
+			_handle_client_control(peer_identifier, message_type, payload.slice(1))
 	elif message_type == ACCEPT_BYTE and payload.size() == ACCEPT_SIZE:
 		is_client_authenticated = true
 		local_identifier = payload.decode_u32(1)
@@ -287,6 +290,10 @@ func _clear_peer_meta(peer: Peer) -> void:
 
 ## Host: sends full meta state to one newly authenticated peer, then the end marker.
 func _send_meta_snapshot(peer_identifier: int) -> void:
+	if scene_gate.is_open:
+		transport.send_control(peer_identifier,
+			SceneCodec.encode_set(scene_gate.epoch, scene_gate.current_scene, scene_gate.current_args))
+		scene_gate.add_pending(peer_identifier)
 	for key: StringName in server_meta:
 		transport.send_control(peer_identifier, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, key, server_meta[key]))
 	var owners: Array[Peer] = [host_peer]
@@ -424,3 +431,10 @@ func _handle_scene_ready(payload: PackedByteArray) -> void:
 	if message.is_empty() || not (scene_gate.is_open && message["epoch"] == scene_gate.epoch): return
 	scene_gate.close()
 	scene_ready.emit(message["epoch"])
+
+## Host: records a client's scene confirm. Duplicates, stale epochs, and unknown senders are ignored.
+func _handle_scene_loaded(peer_identifier: int, payload: PackedByteArray) -> void:
+	var message := SceneCodec.decode(payload)
+	if message.is_empty():
+		return
+	_confirm_scene(peer_identifier, message["epoch"])
