@@ -123,6 +123,8 @@ func _on_connect(packet_peer: ENetPacketPeer) -> void:
 func _on_disconnect(packet_peer: ENetPacketPeer, remote_reason: int) -> void:
 	var peer_identifier: int = identifiers_by_packet_peer.get(packet_peer, 0)
 	if peer_identifier == 0:
+		if not is_hosting && not is_client_connected:
+			join_failed.emit(GdLinkCore.DisconnectReason.TRANSPORT_FAILURE)
 		return
 	var reason: int = local_reasons_by_identifier.get(peer_identifier, remote_reason)
 	if reason == GdLinkCore.DisconnectReason.NONE:
