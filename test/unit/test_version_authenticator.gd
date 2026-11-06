@@ -4,16 +4,16 @@ class SpoofVersionAuthenticator extends VersionAuthenticator:
 	
 	var _game_name: String
 	var _game_version: String
-	
+
 	func _init(game_name: String, game_version: String) -> void:
 		_game_name = game_name
 		_game_version = game_version
-	
-	func _get_project_name() -> String:
-		return _game_name
-	
-	func _get_project_version() -> String:
-		return _game_version
+
+	func _get_project_name_hash() -> PackedByteArray:
+		return _game_name.sha1_buffer()
+
+	func _get_project_version_hash() -> PackedByteArray:
+		return _game_version.sha1_buffer()
 
 var authenticator: VersionAuthenticator
 
@@ -34,19 +34,6 @@ func test_wrong_game_name_rejected_with_game_mismatch() -> void:
 	var reason := authenticator.verify_hello("", other.build_hello())
 	assert_eq(reason, GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
 
-func test_missing_separator_rejected() -> void:
-	var reason := authenticator.verify_hello("", "GdLinkDemo".to_utf8_buffer())
-	assert_eq(reason, GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
-
 func test_empty_payload_rejected() -> void:
 	var reason := authenticator.verify_hello("", PackedByteArray())
-	assert_eq(reason, GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
-
-func test_extra_separator_is_treated_as_version_mismatch() -> void:
-	var payload := "GdLinkDemo\n1.0.0\nextra".to_utf8_buffer()
-	var reason := authenticator.verify_hello("", payload)
-	assert_eq(reason, GdLinkCore.DisconnectReason.AUTH_REJECT_VERSION_MISMATCH)
-
-func test_invalid_utf8_is_rejected() -> void:
-	var reason := authenticator.verify_hello("", PackedByteArray([0xC3, 0x28, 0xFF]))
-	assert_ne(reason, GdLinkCore.DisconnectReason.NONE)
+	assert_eq(reason, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED)

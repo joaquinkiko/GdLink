@@ -1,27 +1,25 @@
 ## Accepts peers whose game name and version match the local build.
-## Hello payload: "game_name\nversion" as UTF-8, capped at MAX_HELLO_BYTES.
 class_name VersionAuthenticator
 extends Authenticator
 
-## Separates fields. Must not appear in any field.
-const FIELD_SEPARATOR := "\n"
+const HASH_BYTES := 20
+const HELLO_BYTES := HASH_BYTES * 2
 
 func build_hello() -> PackedByteArray:
-	return (_get_project_name() + FIELD_SEPARATOR + _get_project_version()).to_utf8_buffer()
+	return _get_project_name_hash() + _get_project_version_hash()
 
 func verify_hello(_identity: String, payload: PackedByteArray) -> GdLinkCore.DisconnectReason:
-	var fields := payload.get_string_from_utf8().split(FIELD_SEPARATOR, true, 1)
-	if fields.size() != 2:
+	if payload.size() < 8:
+		return GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED
+	if payload.slice(0, HASH_BYTES) != _get_project_name_hash():
 		return GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH
-	if fields[0] != _get_project_name():
-		return GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH
-	if fields[1] != _get_project_version():
+	if payload.slice(HASH_BYTES, HELLO_BYTES) != _get_project_version_hash():
 		return GdLinkCore.DisconnectReason.AUTH_REJECT_VERSION_MISMATCH
 	# Passed all tests
 	return GdLinkCore.DisconnectReason.NONE
 
-func _get_project_name() -> String:
-	return ProjectSettings.get_setting("application/config/name", "")
+func _get_project_name_hash() -> PackedByteArray:
+	return ProjectSettings.get_setting("application/config/name", "").sha1_buffer()
 
-func _get_project_version() -> String:
-	return ProjectSettings.get_setting("application/config/version", "")
+func _get_project_version_hash() -> PackedByteArray:
+	return ProjectSettings.get_setting("application/config/version", "").sha1_buffer()

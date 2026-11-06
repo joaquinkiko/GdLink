@@ -4,16 +4,16 @@ class SpoofVersionAuthenticator extends VersionAuthenticator:
 	
 	var _game_name: String
 	var _game_version: String
-	
+
 	func _init(game_name: String, game_version: String) -> void:
 		_game_name = game_name
 		_game_version = game_version
-	
-	func _get_project_name() -> String:
-		return _game_name
-	
-	func _get_project_version() -> String:
-		return _game_version
+
+	func _get_project_name_hash() -> PackedByteArray:
+		return _game_name.sha1_buffer()
+
+	func _get_project_version_hash() -> PackedByteArray:
+		return _game_version.sha1_buffer()
 
 const FAKE_PORT := "7791"
 const FAKE_IP := "127.0.0.1"
