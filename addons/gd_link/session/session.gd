@@ -128,6 +128,7 @@ func _is_channel_allowed(channel: int) -> bool:
 	return channel >= 0 and channel < GdLinkCore.RESERVED_CHANNEL_LIMIT
 
 func _is_route_open(peer_identifier: int) -> bool:
+	if scene_gate.is_open: return false
 	if not is_hosting: return is_client_authenticated
 	var peer := get_peer(peer_identifier)
 	return peer != null and peer.is_authenticated()

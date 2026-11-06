@@ -554,3 +554,33 @@ func test_late_joiner_must_confirm_before_completion() -> void:
 	assert_signal_not_emitted(session, "scene_ready")
 	session._confirm_scene(5, 1)
 	assert_signal_emitted_with_parameters(session, "scene_ready", [1])
+
+func test_host_data_blocked_during_barrier_meta_flows() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	session.swap_scene("arena", {})
+	transport.sent_data.clear()
+	transport.sent_controls.clear()
+	session.send_data(4, 0, PackedByteArray([1]), true)
+	session.set_server_meta(&"round", 2)
+	_flush_frame()
+	assert_true(transport.sent_data.is_empty())
+	assert_false(_sent_to(4).is_empty())
+
+func test_client_data_blocked_while_loading_then_resumes() -> void:
+	_join_accepted(7)
+	transport.control_received.emit(1, SceneCodec.encode_set(1, "arena", {}))
+	watch_signals(session)
+	session.send_data(1, 0, PackedByteArray([1]), true)
+	assert_true(transport.sent_data.is_empty())
+	transport.data_received.emit(1, 0, PackedByteArray([2]))
+	assert_signal_not_emitted(session, "data_received")
+	transport.control_received.emit(1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, 1))
+	session.send_data(1, 0, PackedByteArray([1]), true)
+	assert_eq(transport.sent_data.size(), 1)
+
+func test_client_meta_flows_during_loading() -> void:
+	_join_accepted(7)
+	transport.control_received.emit(1, SceneCodec.encode_set(1, "arena", {}))
+	transport.control_received.emit(1, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 3))
+	assert_eq(session.get_server_meta(), {&"round": 3})
