@@ -24,6 +24,9 @@ enum ControlMessage {
 	META_PEER_SET = 5,
 	META_PEER_ERASE = 6,
 	META_SNAPSHOT_END = 7,
+	SCENE_SET = 8,
+	SCENE_LOADED = 9,
+	SCENE_READY = 10,
 	}
 
 ## Peer identifier that owns host-side peer meta.
@@ -45,6 +48,8 @@ enum DisconnectReason {
 	AUTH_REJECT_INCORRECT_PASSWORD,
 	AUTH_REJECT_RATE_LIMITED,
 	AUTH_REJECT_BANNED,
+	
+	SCENE_LOAD_TIMEOUT,
 	}
 
 # Logging
