@@ -8,3 +8,6 @@ extends RefCounted
 
 ## Host: returns NONE to accept, or the rejection reason.
 @abstract func verify_hello(identity: String, payload: PackedByteArray) -> GdLinkCore.DisconnectReason
+
+## Largest valid hello body in bytes. Bounds pre-auth input.
+@abstract func get_max_hello_bytes() -> int

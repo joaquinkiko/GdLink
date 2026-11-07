@@ -166,6 +166,10 @@ func _on_control_received(peer_identifier: int, payload: PackedByteArray) -> voi
 	if payload.is_empty(): return
 	var message_type := payload[0]
 	if is_hosting:
+		if get_peer(peer_identifier) == null: return
+		if not _is_valid_client_message(peer_identifier, message_type, payload.size()):
+			transport.disconnect_peer(peer_identifier, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED)
+			return
 		if message_type == GdLinkCore.ControlMessage.SCENE_LOADED:
 			_handle_scene_loaded(peer_identifier, payload)
 		else:
@@ -176,6 +180,15 @@ func _on_control_received(peer_identifier: int, payload: PackedByteArray) -> voi
 		join_succeeded.emit(local_identifier)
 	elif is_client_authenticated and peer_identifier == GdLinkCore.HOST_PEER_IDENTIFIER:
 		_handle_host_message(payload)
+
+## Host: true if the type is allowed from this peer's state. Pre-auth HELLO is size-capped.
+func _is_valid_client_message(peer_identifier: int, message_type: int, size: int) -> bool:
+	var peer: Peer = peers.get(peer_identifier)
+	if peer == null: return false
+	if peer.is_authenticated():
+		return message_type == GdLinkCore.ControlMessage.SCENE_LOADED
+	return message_type == GdLinkCore.ControlMessage.HELLO \
+		and size <= authenticator.get_max_hello_bytes() + 1
 
 ## Host: dispatches client control. Only HELLO is accepted from clients.
 func _handle_client_control(peer_identifier: int, message_type: int, body: PackedByteArray) -> void:

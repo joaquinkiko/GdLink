@@ -63,14 +63,12 @@ func test_valid_hello_authenticates_and_sends_accept() -> void:
 	assert_signal_emitted(session, "peer_authenticated")
 	assert_eq(transport.sent_controls[0][1], session._build_accept(1))
 
-func test_replayed_hello_after_auth_is_ignored() -> void:
+func test_replayed_hello_after_auth_disconnects_peer() -> void:
 	session.host(FAKE_PORT)
 	_connect_peer(1, FAKE_IP)
-	watch_signals(session)
 	transport.control_received.emit(1, session._build_hello_message())
 	transport.control_received.emit(1, session._build_hello_message())
-	assert_signal_emit_count(session, "peer_authenticated", 1)
-	assert_eq(transport.sent_controls.size(), 2, "accept plus empty snapshot end")
+	assert_eq(transport.disconnected_calls, [[1, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED]])
 
 func test_timeout_disconnects_unauthenticated_peer() -> void:
 	session.host(FAKE_PORT)
@@ -154,7 +152,7 @@ func test_non_hello_before_auth_disconnects_peer() -> void:
 	session.host(FAKE_PORT)
 	_connect_peer(1, FAKE_IP)
 	transport.control_received.emit(1, PackedByteArray([GdLinkCore.ControlMessage.ACCEPT, 0, 0, 0, 0]))
-	assert_eq(transport.disconnected_calls[0][1], GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
+	assert_eq(transport.disconnected_calls[0][1], GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED)
 
 func test_empty_control_payload_is_ignored() -> void:
 	session.host(FAKE_PORT)
@@ -420,14 +418,14 @@ func test_client_getters_return_copies() -> void:
 	copy[&"round"] = 99
 	assert_eq(session.get_server_meta()[&"round"], 3)
 
-func test_client_sent_meta_is_not_applied_on_host() -> void:
+func test_client_sent_meta_disconnects_peer_and_is_not_applied() -> void:
 	session.host(FAKE_PORT)
 	_authenticate_peer(4)
 	transport.control_received.emit(4, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_SERVER_SET, 0, &"round", 99))
 	transport.control_received.emit(4, MetaCodec.encode_set(GdLinkCore.ControlMessage.META_PEER_SET, 4, &"team", "red"))
 	assert_true(session.get_server_meta().is_empty())
 	assert_true(session.get_peer_meta(4).is_empty())
-	assert_true(transport.disconnected_calls.is_empty())
+	assert_eq(transport.disconnected_calls[0], [4, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED])
 
 func test_swap_rejected_on_client() -> void:
 	session.join(FAKE_ADDRESS)
@@ -649,3 +647,45 @@ func test_stall_signal_ignores_stale_epoch() -> void:
 	watch_signals(session)
 	session._on_host_load_timeout(0)
 	assert_signal_not_emitted(session, "scene_load_stalled")
+
+func test_oversized_pre_auth_message_disconnects_peer() -> void:
+	session.host(FAKE_PORT)
+	_connect_peer(1, FAKE_IP)
+	var message := session._build_hello_message()
+	message.resize(message.size() + 1)
+	transport.control_received.emit(1, message)
+	assert_eq(transport.disconnected_calls, [[1, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED]])
+	assert_false(session.get_peer(1).is_authenticated())
+
+func test_pre_auth_scene_loaded_disconnects_peer() -> void:
+	session.host(FAKE_PORT)
+	_connect_peer(1, FAKE_IP)
+	transport.control_received.emit(1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_eq(transport.disconnected_calls, [[1, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED]])
+
+func test_authenticated_disallowed_types_disconnect_peer() -> void:
+	session.host(FAKE_PORT)
+	_authenticate_peer(4)
+	var disallowed := [
+		GdLinkCore.ControlMessage.HELLO,
+		GdLinkCore.ControlMessage.SCENE_SET,
+		GdLinkCore.ControlMessage.SCENE_READY,
+		GdLinkCore.ControlMessage.META_SERVER_SET,
+	]
+	for message_type: int in disallowed:
+		transport.disconnected_calls.clear()
+		transport.control_received.emit(4, PackedByteArray([message_type]))
+		assert_eq(transport.disconnected_calls, [[4, GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED]], str(message_type))
+
+func test_authenticated_scene_loaded_is_not_kicked() -> void:
+	_open_swap_two_clients()
+	transport.control_received.emit(4, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_true(transport.disconnected_calls.is_empty())
+	assert_false(session.scene_gate.is_pending(4))
+
+func test_oversized_scene_loaded_is_ignored() -> void:
+	_open_swap_two_clients()
+	var confirm := SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1)
+	confirm.resize(confirm.size() + 1)
+	transport.control_received.emit(4, confirm)
+	assert_true(session.scene_gate.is_pending(4))

@@ -23,3 +23,6 @@ func _get_project_name_hash() -> PackedByteArray:
 
 func _get_project_version_hash() -> PackedByteArray:
 	return ProjectSettings.get_setting("application/config/version", "").sha1_buffer()
+
+func get_max_hello_bytes() -> int:
+	return HELLO_BYTES

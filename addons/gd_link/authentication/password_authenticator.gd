@@ -21,3 +21,6 @@ func verify_hello(identity: String, payload: PackedByteArray) -> GdLinkCore.Disc
 	if payload.slice(HELLO_BYTES, PASSWORD_HELLO_BYTES) != _password_hash:
 		return GdLinkCore.DisconnectReason.AUTH_REJECT_PASSWORD
 	return GdLinkCore.DisconnectReason.NONE
+
+func get_max_hello_bytes() -> int:
+	return PASSWORD_HELLO_BYTES
