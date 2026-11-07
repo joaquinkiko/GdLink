@@ -9,7 +9,7 @@ func build_hello() -> PackedByteArray:
 	return _get_project_name_hash() + _get_project_version_hash()
 
 func verify_hello(_identity: String, payload: PackedByteArray) -> GdLinkCore.DisconnectReason:
-	if payload.size() < 8:
+	if payload.size() < HELLO_BYTES:
 		return GdLinkCore.DisconnectReason.AUTH_REJECT_MALFORMED
 	if payload.slice(0, HASH_BYTES) != _get_project_name_hash():
 		return GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH
