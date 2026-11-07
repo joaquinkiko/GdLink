@@ -42,8 +42,12 @@ func _on_session_lost() -> void:
 	peer_disconnected.emit(1)
 
 func _on_data_received(peer_identifier: int, channel: int, payload: PackedByteArray) -> void:
-	if queued_packets.size() < MAX_QUEUED_PACKETS:
-		queued_packets.append({"peer": peer_identifier, "channel": channel, "payload": payload})
+	if queued_packets.size() >= MAX_QUEUED_PACKETS:
+		GdLinkCore.log_message(
+			GdLinkCore.LogLevel.WARN, "RPC queue full, dropped packet from %d"%peer_identifier
+			)
+		return
+	queued_packets.append({"peer": peer_identifier, "channel": channel, "payload": payload})
 
 func _resolve_recipients() -> Array[int]:
 	var recipients: Array[int] = []

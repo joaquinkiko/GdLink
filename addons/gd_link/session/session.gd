@@ -6,6 +6,8 @@ extends Node
 const ACCEPT_BYTE := GdLinkCore.ControlMessage.ACCEPT
 ## Total size of an accept message
 const ACCEPT_SIZE := 5
+## Max queued packets during a scene swap gate before packets are dropped.
+const MAX_DEFERRED_DATA := 1024
 
 ## Client: emitted after the host accepts the hello.
 signal join_succeeded(assigned_identifier: int)
@@ -39,6 +41,8 @@ signal scene_changed(scene: String, args: Dictionary)
 signal scene_load_stalled(epoch: int)
 ## Host: emitted once the host has closed and all peers are gone.
 signal hosting_stopped
+## Emitted when barrier or overflow drops data. Unreliable sends drop during barriers.
+signal data_dropped(peer_identifier: int, channel: int)
 
 ## Active transport.
 var transport: Transport
@@ -69,6 +73,10 @@ var local_identifier := 0
 var scene_timeout_seconds := 0.0
 ## True if we are stopping hosting
 var is_stopping_host := false
+## Reliable sends queued while the scene gate is open.
+var deferred_sends: Array[Dictionary]
+## Inbound data queued while the scene gate is open.
+var deferred_inbound: Array[Dictionary]
 
 func _process(delta: float) -> void:
 	if transport != null: transport.poll()
@@ -112,6 +120,7 @@ func join(join_address: String) -> Error:
 	host_peer = null
 	_clear_client_meta()
 	scene_gate.close()
+	_clear_deferred()
 	return transport.join(join_address)
 
 ## Client: closes the session with DisconnectReason.VOLUNTARY.
@@ -126,13 +135,58 @@ func kick(peer_identifier: int, reason: GdLinkCore.DisconnectReason) -> void:
 		transport.disconnect_peer(peer_identifier, reason)
 
 func send_data(peer_identifier: int, channel: int, payload: PackedByteArray, reliable: bool) -> void:
-	if not _is_channel_allowed(channel) or payload.size() > GdLinkCore.MAX_PAYLOAD_BYTES: return
-	if not _is_route_open(peer_identifier): return
+	if not _is_channel_allowed(channel) || payload.size() > GdLinkCore.MAX_PAYLOAD_BYTES:
+		return
+	if not _is_peer_reachable(peer_identifier):
+		return
+	if scene_gate.is_open:
+		if reliable:
+			_defer(
+				deferred_sends,
+				{"peer": peer_identifier, "channel": channel, "payload": payload, "reliable": reliable}
+				)
+		else:
+			data_dropped.emit(peer_identifier, channel)
+		return
 	transport.send_data(peer_identifier, channel, payload, reliable)
 
 func _on_data_received(peer_identifier: int, channel: int, payload: PackedByteArray) -> void:
-	if not _is_channel_allowed(channel) or not _is_route_open(peer_identifier): return
+	if not _is_channel_allowed(channel):
+		return
+	if scene_gate.is_open:
+		_defer(deferred_inbound, {"peer": peer_identifier, "channel": channel, "payload": payload})
+		return
+	if not _is_peer_reachable(peer_identifier):
+		return
 	data_received.emit(peer_identifier, channel, payload)
+
+func _is_peer_reachable(peer_identifier: int) -> bool:
+	if not is_hosting:
+		return is_client_authenticated
+	var peer := get_peer(peer_identifier)
+	return peer != null && peer.is_authenticated()
+
+## Queues an entry, or emits data_dropped if the queue is full.
+func _defer(queue: Array[Dictionary], entry: Dictionary) -> void:
+	if queue.size() >= MAX_DEFERRED_DATA:
+		data_dropped.emit(entry["peer"], entry["channel"])
+		return
+	queue.append(entry)
+
+## Sends queued data now that the gate is closed. Reachability is rechecked per entry.
+func _flush_deferred() -> void:
+	var outbound := deferred_sends.duplicate()
+	var inbound := deferred_inbound.duplicate()
+	deferred_sends.clear()
+	deferred_inbound.clear()
+	for entry: Dictionary in outbound:
+		send_data(entry["peer"], entry["channel"], entry["payload"], entry["reliable"])
+	for entry: Dictionary in inbound:
+		_on_data_received(entry["peer"], entry["channel"], entry["payload"])
+
+func _clear_deferred() -> void:
+	deferred_sends.clear()
+	deferred_inbound.clear()
 
 func _is_channel_allowed(channel: int) -> bool:
 	return channel >= 0 and channel < GdLinkCore.RESERVED_CHANNEL_LIMIT
@@ -232,6 +286,7 @@ func _on_peer_disconnected(peer_identifier: int, reason: GdLinkCore.DisconnectRe
 	elif is_client_authenticated:
 		is_client_authenticated = false
 		scene_gate.close()
+		_clear_deferred()
 		metrics.forget_peer(GdLinkCore.HOST_PEER_IDENTIFIER)
 		_clear_client_meta()
 		session_closed.emit(reason)
@@ -430,6 +485,7 @@ func _check_scene_barrier() -> void:
 	var message := SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, completed_epoch)
 	for peer: Peer in get_authenticated_peers():
 		transport.send_control(peer.peer_identifier, message)
+	_flush_deferred()
 	scene_ready.emit(completed_epoch)
 
 ## Host and client: call once the scene has loaded. Host confirms itself.
@@ -461,10 +517,13 @@ func _handle_scene_set(payload: PackedByteArray) -> void:
 	scene_gate.adopt_swap(message["epoch"], message["scene"], message["args"], local_identifier)
 	scene_changed.emit(message["scene"], message["args"])
 
+## Client: in _handle_scene_ready, flush before emitting scene_ready
 func _handle_scene_ready(payload: PackedByteArray) -> void:
 	var message := SceneCodec.decode(payload)
-	if message.is_empty() || not (scene_gate.is_open && message["epoch"] == scene_gate.epoch): return
+	if message.is_empty() || not (scene_gate.is_open && message["epoch"] == scene_gate.epoch):
+		return
 	scene_gate.close()
+	_flush_deferred()
 	scene_ready.emit(message["epoch"])
 
 ## Host: records a client's scene confirm. Duplicates, stale epochs, and unknown senders are ignored.
@@ -506,5 +565,6 @@ func _finish_hosting() -> void:
 	server_meta.clear()
 	pending_meta.clear()
 	scene_gate.close()
+	_clear_deferred()
 	metrics.clear()
 	hosting_stopped.emit()

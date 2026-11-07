@@ -565,7 +565,7 @@ func test_host_data_blocked_during_barrier_meta_flows() -> void:
 	assert_true(transport.sent_data.is_empty())
 	assert_false(_sent_to(4).is_empty())
 
-func test_client_data_blocked_while_loading_then_resumes() -> void:
+func test_client_data_deferred_while_loading_then_flushed() -> void:
 	_join_accepted(7)
 	transport.control_received.emit(1, SceneCodec.encode_set(1, "arena", {}))
 	watch_signals(session)
@@ -574,8 +574,8 @@ func test_client_data_blocked_while_loading_then_resumes() -> void:
 	transport.data_received.emit(1, 0, PackedByteArray([2]))
 	assert_signal_not_emitted(session, "data_received")
 	transport.control_received.emit(1, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_READY, 1))
-	session.send_data(1, 0, PackedByteArray([1]), true)
 	assert_eq(transport.sent_data.size(), 1)
+	assert_signal_emitted_with_parameters(session, "data_received", [1, 0, PackedByteArray([2])])
 
 func test_client_meta_flows_during_loading() -> void:
 	_join_accepted(7)
@@ -689,3 +689,49 @@ func test_oversized_scene_loaded_is_ignored() -> void:
 	confirm.resize(confirm.size() + 1)
 	transport.control_received.emit(4, confirm)
 	assert_true(session.scene_gate.is_pending(4))
+
+func test_reliable_send_during_barrier_flushes_on_completion() -> void:
+	_open_swap_two_clients()
+	session.send_data(4, 0, PackedByteArray([1]), true)
+	assert_true(transport.sent_data.is_empty())
+	transport.control_received.emit(4, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	transport.control_received.emit(5, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_eq(transport.sent_data.size(), 1)
+
+func test_unreliable_send_during_barrier_is_dropped_and_signaled() -> void:
+	_open_swap_two_clients()
+	watch_signals(session)
+	session.send_data(4, 0, PackedByteArray([1]), false)
+	assert_signal_emitted_with_parameters(session, "data_dropped", [4, 0])
+	assert_true(session.deferred_sends.is_empty())
+
+func test_deferred_overflow_emits_data_dropped() -> void:
+	_open_swap_two_clients()
+	watch_signals(session)
+	for index in Session.MAX_DEFERRED_DATA + 1:
+		session.send_data(4, 0, PackedByteArray([1]), true)
+	assert_signal_emit_count(session, "data_dropped", 1)
+	assert_eq(session.deferred_sends.size(), Session.MAX_DEFERRED_DATA)
+
+func test_deferred_send_to_removed_peer_is_discarded() -> void:
+	_open_swap_two_clients()
+	session.send_data(4, 0, PackedByteArray([1]), true)
+	transport.peer_disconnected.emit(4, GdLinkCore.DisconnectReason.VOLUNTARY)
+	transport.control_received.emit(5, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_true(transport.sent_data.is_empty())
+
+func test_inbound_during_barrier_is_delivered_on_completion() -> void:
+	_open_swap_two_clients()
+	watch_signals(session)
+	transport.data_received.emit(4, 0, PackedByteArray([2]))
+	assert_signal_not_emitted(session, "data_received")
+	transport.control_received.emit(4, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	transport.control_received.emit(5, SceneCodec.encode_confirm(GdLinkCore.ControlMessage.SCENE_LOADED, 1))
+	assert_signal_emitted_with_parameters(session, "data_received", [4, 0, PackedByteArray([2])])
+
+func test_session_closed_discards_deferred_sends() -> void:
+	_join_accepted(7)
+	transport.control_received.emit(1, SceneCodec.encode_set(1, "arena", {}))
+	session.send_data(1, 0, PackedByteArray([1]), true)
+	transport.peer_disconnected.emit(1, GdLinkCore.DisconnectReason.KICKED)
+	assert_true(session.deferred_sends.is_empty())
