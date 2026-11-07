@@ -200,9 +200,6 @@ func _is_route_open(peer_identifier: int) -> bool:
 func _on_peer_connected(peer_identifier: int) -> void:
 	if not is_hosting: return
 	var peer := Peer.new(peer_identifier, transport.get_identity(peer_identifier))
-	if peer == null:
-		transport.disconnect_peer(peer_identifier, GdLinkCore.DisconnectReason.AUTH_REJECT_GAME_MISMATCH)
-		return
 	peer.state = Peer.State.AWAITING_HELLO
 	peers[peer_identifier] = peer
 	get_tree().create_timer(GdLinkCore.AUTHENTICATION_TIMEOUT_SECONDS).timeout.connect(
